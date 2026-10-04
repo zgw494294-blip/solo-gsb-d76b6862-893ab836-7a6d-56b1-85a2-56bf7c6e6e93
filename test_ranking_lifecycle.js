@@ -444,6 +444,51 @@ async function main() {
   await flush();
   assert(results.innerHTML === "" && $("error-box").hidden, "清空后名次表立即隐藏");
 
+  console.log("临时重号链路：每次改号立即清除该行原编号罚秒，改回不恢复");
+  // 清空后重建：区间 10~60 / 10~60，选手 101/102/103，各一趟。
+  setVal("smMin", "10"); setVal("smMax", "60"); setVal("mfMin", "10"); setVal("mfMax", "60");
+  fire(addRunner, "click"); fire(addRunner, "click"); // 共 3 行选手
+  numInputs()[0].value = "101"; numInputs()[1].value = "102"; numInputs()[2].value = "103";
+  for (let i = 0; i < 8; i++) fire(addRecord, "click"); // 共 9 行记录
+  [
+    ["a1", "101", "S", "0"], ["b1", "101", "M", "10"], ["c1", "101", "F", "20"],
+    ["d1", "102", "S", "0"], ["e1", "102", "M", "11"], ["f1", "102", "F", "22"],
+    ["g1", "103", "S", "0"], ["h1", "103", "M", "15"], ["i1", "103", "F", "30"],
+  ].forEach((r) => setRow(...r));
+  server.result = fixtureA;
+  await adjudicate();
+  savePenalty(101, "3", "抢跑");
+  savePenalty(102, "7", "踩线");
+  savePenalty(103, "5", "设备故障");
+  assert(slotHtml().includes(rowHtml(102, 1, 22, 7, 29, "第 2 名")), "102 罚秒 7 秒已生效");
+  // 1) 101 行改成 102（临时重号）：101 的罚秒此刻清除，102 的暂保留（其行未动）
+  numInputs()[0].value = "102";
+  fire(runnerRows, "input");
+  // 2) 原 102 行改为 104：102 的罚秒此刻清除，即使第一行仍占用 102
+  numInputs()[1].value = "104";
+  fire(runnerRows, "input");
+  await adjudicate(); // 尚未改回，渲染即应显示 102 默认 0 秒、空原因
+  assert(editorOf(102).querySelector(".penalty-seconds").value === "0", "改号后 102 罚秒立即归零");
+  assert(editorOf(102).querySelector(".penalty-reason").value === "", "改号后 102 原因立即清空");
+  // 3) 104 改回 102：不恢复
+  numInputs()[1].value = "102";
+  fire(runnerRows, "input");
+  // 4) 第一行改回 101：不恢复
+  numInputs()[0].value = "101";
+  fire(runnerRows, "input");
+  await adjudicate();
+  assert(editorOf(102).querySelector(".penalty-seconds").value === "0", "改回后 102 仍默认 0 秒");
+  assert(editorOf(102).querySelector(".penalty-reason").value === "", "改回后 102 原因仍为空");
+  const cur102 = editorOf(102).querySelector(".penalty-current").innerHTML;
+  assert(cur102.includes("当前已保存：0 秒") && !cur102.includes("踩线"), "102 旧罚秒与原因未被后续响应恢复");
+  assert(slotHtml().includes(rowHtml(102, 1, 22, 0, 22, "第 2 名")), "名次表 102 罚秒为 0");
+  assert(editorOf(101).querySelector(".penalty-seconds").value === "0", "101 行改号后罚秒同样归零");
+  assert(slotHtml().includes(rowHtml(103, 1, 30, 5, 35, "第 3 名")), "未改号的 103 罚秒不受影响");
+  assert(
+    editorOf(103).querySelector(".penalty-current").innerHTML.includes("设备故障"),
+    "未改号的 103 原因保留"
+  );
+
   console.log(failures === 0 ? "\nALL RANKING SCENARIOS PASSED" : `\n${failures} ASSERTION(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 }

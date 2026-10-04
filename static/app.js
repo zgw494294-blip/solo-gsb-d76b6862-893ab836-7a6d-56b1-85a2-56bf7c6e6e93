@@ -17,8 +17,10 @@ const resultsBox = document.getElementById("results");
 /* ---------- 行管理 ---------- */
 
 function runnerRowHtml(index, value = "") {
+  // data-bound-number：该行当前绑定（最近一次确认使用）的编号，
+  // 改号/删行时据此立即清除原编号的罚秒，见 reconcileRunnerNumbers。
   return `
-    <div class="runner-row" data-index="${index}">
+    <div class="runner-row" data-index="${index}" data-bound-number="${escapeAttr(value)}">
       <span class="row-index">选手 ${index}</span>
       <input type="number" min="1" step="1" class="runner-number" value="${escapeAttr(value)}" placeholder="正整数编号" />
       <button type="button" class="btn danger remove-runner" ${index === 1 ? "hidden" : ""}>删除</button>
@@ -81,7 +83,11 @@ addRecordBtn.addEventListener("click", () => {
 
 runnerRows.addEventListener("click", (e) => {
   if (e.target.classList.contains("remove-runner")) {
-    e.target.closest(".runner-row").remove();
+    const row = e.target.closest(".runner-row");
+    // 删除选手行：立即清除该行编号已保存的罚秒与原因，即使另一行仍占用该编号。
+    reconcileRunnerNumbers(); // 先对齐各行绑定编号（覆盖无事件改值的兜底路径）
+    dropPenaltyForNumber(row.dataset.boundNumber || "");
+    row.remove();
     refreshRunnerButtons();
     onInputChanged();
   }
@@ -114,7 +120,9 @@ function onInputChanged() {
   inputVersion += 1;
   // 先按当前输入即时丢弃绑定已失效的复核：不必、也不能等到合法裁决返回。
   pruneReviewsByBindings();
-  // 选手编号被修改或选手被删除时，对应罚秒也在此刻立即清除（改回不恢复）。
+  // 选手行改号或删行时，该行原编号的罚秒也在此刻立即清除（改回不恢复），
+  // 即使另一行仍占用该编号、输入非法或尚未重算；再兜底清掉孤儿罚秒。
+  reconcileRunnerNumbers();
   prunePenaltiesByRunners();
   clearOutcome();
   pendingHint.hidden = false;
@@ -390,8 +398,37 @@ const MAX_PENALTY_REASON = 200;
 // 最近一次展示的合法裁决结果：保存罚秒后据此立即重排名次，无需重新请求。
 let latestResult = null;
 
-// 罚秒只跟随选手编号：编号被改掉或选手被删除时立即清除对应罚秒，
-// 之后改回同编号也不恢复；感应记录、耗时区间等其他编辑一律保留。
+// 罚秒只跟随选手行的“绑定编号”（data-bound-number）：任一行的编号被改动
+// （含清空、非法中间值、与别行重号）或该行被删除时，该行原编号的罚秒与原因
+// 立即清除——即使另一行仍占用该编号、当前输入非法或尚未重算；之后改回或重新
+// 添加同编号也只能看到默认 0 秒与空原因，任何后续响应都不得恢复。
+function dropPenaltyForNumber(numberText) {
+  if (/^\d+$/.test(numberText)) penalties.delete(Number(numberText));
+}
+
+// 逐行核对当前编号与绑定编号：不一致即该行被改号，清除其原编号的罚秒，
+// 再把绑定更新为当前值。在每次输入事件时同步执行，不等待重算结果。
+function reconcileRunnerNumbers() {
+  for (const row of runnerRows.querySelectorAll(".runner-row")) {
+    const current = row.querySelector(".runner-number").value.trim();
+    const bound = row.dataset.boundNumber || "";
+    if (current === bound) continue;
+    dropPenaltyForNumber(bound); // 清除该行原编号的罚秒，而非新编号
+    row.dataset.boundNumber = current;
+  }
+}
+
+// 渲染合法结果时把各行绑定编号对齐到当前显示值：覆盖脚本直接赋值等不触发
+// 输入事件的路径，保证下一次改号/删除能拿到准确的原编号。
+function bindRunnerNumbers() {
+  for (const row of runnerRows.querySelectorAll(".runner-row")) {
+    row.dataset.boundNumber = row.querySelector(".runner-number").value.trim();
+  }
+}
+
+// 兜底一致性：罚秒不得挂在任何“当前没有选手行使用”的编号上。改号/删行的
+// 即时清除由 reconcileRunnerNumbers 与删除监听完成；感应记录、耗时区间等
+// 其他编辑不会触碰选手编号，已保存的罚秒一律保留。
 function prunePenaltiesByRunners() {
   const numbers = new Set(
     [...runnerRows.querySelectorAll(".runner-number")]
@@ -541,6 +578,7 @@ function gateChip(gate, id, time) {
 
 function renderResults(result) {
   latestResult = result; // 名次表与罚秒保存都以这份最新合法结果为准
+  bindRunnerNumbers(); // 行绑定编号对齐当前值，供下一次改号/删除精确清除罚秒
   const standards = currentStandards();
   const keyOf = (runner, lap) => lapReviewKey(runner, lap, standards);
 

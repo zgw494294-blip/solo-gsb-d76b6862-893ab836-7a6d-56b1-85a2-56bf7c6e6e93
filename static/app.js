@@ -4,6 +4,26 @@ const MAX_RUNNERS = 3;
 const MAX_RECORDS = 40;
 const GATE_LABELS = { S: "起点 S", M: "中途门 M", F: "终点 F" };
 
+/* ---------- 选手行编号追踪与罚秒归属（须先于所有事件监听与行创建声明） ---------- */
+
+// 罚秒只绑定选手编号，仅用于名次表：不改变采纳记录、裁决用时或人工复核。
+// 仅保存在页面内存中，刷新页面即全部清除。
+const penalties = new Map(); // runnerNumber -> { seconds: number, reason: string }
+const MAX_PENALTY_REASON = 200;
+
+// 按“行”追踪每行当前登记的编号（数字，空/非法为 null）。罚秒虽按编号保存，
+// 但编号的归属跟随行：一行离开旧编号（改号、清空、删行）的那一刻，旧编号的
+// 罚秒必须立即释放——即使另一行仍占用该编号（临时重号），也不等重算、不看合法性。
+const runnerRowNumbers = new WeakMap();
+
+function parseRunnerNumber(value) {
+  return /^\d+$/.test(value) ? Number(value) : null;
+}
+
+function releaseRunnerPenalty(number) {
+  if (number !== null) penalties.delete(number);
+}
+
 const runnerRows = document.getElementById("runner-rows");
 const recordRows = document.getElementById("record-rows");
 const addRunnerBtn = document.getElementById("add-runner");
@@ -46,6 +66,10 @@ function recordRowHtml() {
 function addRunnerRow(value) {
   if (runnerRows.children.length >= MAX_RUNNERS) return;
   runnerRows.insertAdjacentHTML("beforeend", runnerRowHtml(runnerRows.children.length + 1, value));
+  // 新行从诞生起登记当前编号（载入示例时即为示例编号）：此后该行改号时，
+  // 才能按“行”识别出它离开的旧编号并立即释放对应罚秒。
+  const row = runnerRows.children[runnerRows.children.length - 1];
+  runnerRowNumbers.set(row, parseRunnerNumber(row.querySelector(".runner-number").value));
   refreshRunnerButtons();
 }
 
@@ -81,7 +105,11 @@ addRecordBtn.addEventListener("click", () => {
 
 runnerRows.addEventListener("click", (e) => {
   if (e.target.classList.contains("remove-runner")) {
-    e.target.closest(".runner-row").remove();
+    const row = e.target.closest(".runner-row");
+    // 行删除先于 remove() 执行：此刻立即释放该行原编号的罚秒，
+    // 即使另一行仍占用同一编号、输入非法或尚未重算。
+    releasePenaltyForRemovedRunner(row);
+    row.remove();
     refreshRunnerButtons();
     onInputChanged();
   }
@@ -383,21 +411,40 @@ resultsBox.addEventListener("click", (e) => {
 
 /* ---------- 比赛名次与罚秒（仅本次页面会话，不上传、不影响裁决与复核） ---------- */
 
-// 罚秒只绑定选手编号，仅用于名次表：不改变采纳记录、裁决用时或人工复核。
-// 仅保存在页面内存中，刷新页面即全部清除。
-const penalties = new Map(); // runnerNumber -> { seconds: number, reason: string }
-const MAX_PENALTY_REASON = 200;
 // 最近一次展示的合法裁决结果：保存罚秒后据此立即重排名次，无需重新请求。
 let latestResult = null;
 
-// 罚秒只跟随选手编号：编号被改掉或选手被删除时立即清除对应罚秒，
-// 之后改回同编号也不恢复；感应记录、耗时区间等其他编辑一律保留。
+// 仅供无浏览器生命周期测试（test_ranking_lifecycle.js）直接断言内存中的罚秒。
+if (typeof globalThis !== "undefined") globalThis.__penaltiesForTest = penalties;
+
+// 删行时（在 DOM remove 之前调用）：该行已不在表单中，直接释放其原编号罚秒。
+function releasePenaltyForRemovedRunner(row) {
+  releaseRunnerPenalty(
+    runnerRowNumbers.has(row)
+      ? runnerRowNumbers.get(row)
+      : parseRunnerNumber(row.querySelector(".runner-number").value)
+  );
+  runnerRowNumbers.delete(row);
+}
+
+// 每次输入变更：逐行比对当前编号与该行上一次登记的编号。
+// 任一行改号——旧编号变成新编号（含另一行仍占用旧编号的临时重号、重号非法、
+// 清空或非法输入）——旧编号的罚秒与原因此刻立即清除；之后改回同编号或重新
+// 添加同编号，行的登记已是新值，旧罚秒不会再被任何后续响应恢复。
+// 未改号的行（记录、区间等编辑）不受影响。
 function prunePenaltiesByRunners() {
+  for (const row of runnerRows.querySelectorAll(".runner-row")) {
+    const input = row.querySelector(".runner-number");
+    const next = parseRunnerNumber(input.value.trim());
+    const prev = runnerRowNumbers.has(row) ? runnerRowNumbers.get(row) : next;
+    if (prev !== next) releaseRunnerPenalty(prev);
+    runnerRowNumbers.set(row, next);
+  }
+  // 防御性兜底：编号已不在任何行中的残余罚秒同样清除。
   const numbers = new Set(
     [...runnerRows.querySelectorAll(".runner-number")]
-      .map((el) => el.value.trim())
-      .filter((v) => v !== "")
-      .map((v) => (/^\d+$/.test(v) ? Number(v) : NaN))
+      .map((el) => parseRunnerNumber(el.value.trim()))
+      .filter((v) => v !== null)
   );
   for (const runner of [...penalties.keys()]) {
     if (!numbers.has(runner)) penalties.delete(runner);

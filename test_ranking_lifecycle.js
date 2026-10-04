@@ -256,6 +256,13 @@ function findRow(id) {
   return recordRows.querySelectorAll(".record-row").find((r) => r.querySelector(".rec-id").value === id);
 }
 const numInputs = () => [...runnerRows.querySelectorAll(".runner-number")];
+// 按当前编号唯一定位选手行；调用方须确保该编号在表单中只出现一次（无重号）。
+function rowOfRunner(v) {
+  const hits = [...runnerRows.querySelectorAll(".runner-row")]
+    .filter((x) => x.querySelector(".runner-number").value === v);
+  if (hits.length !== 1) throw new Error(`runner ${v} 出现 ${hits.length} 次，无法唯一定位`);
+  return hits[0];
+}
 
 // 名次表槽位的实时 HTML（罚秒保存后会被原地重排）。
 const slotHtml = () => results.querySelector(".ranking-table-slot").innerHTML;
@@ -289,6 +296,7 @@ async function main() {
   setVal("smMin", "10"); setVal("smMax", "60"); setVal("mfMin", "10"); setVal("mfMax", "60");
   fire(addRunner, "click"); fire(addRunner, "click"); // 共 3 行选手
   numInputs()[0].value = "101"; numInputs()[1].value = "102"; numInputs()[2].value = "103";
+  fire(runnerRows, "input"); // 与真实页面一致：录入编号触发输入事件，建立各行的编号基线
   for (let i = 0; i < 7; i++) fire(addRecord, "click"); // 共 9 行记录
   [
     ["a1", "101", "S", "0"], ["b1", "101", "M", "10"], ["c1", "101", "F", "20"],
@@ -432,6 +440,82 @@ async function main() {
     slotHtml().includes(rowHtml(101, 0, 0, 3, 3, "—")),
     "最新合法结果套用当时已保存的罚秒（区间编辑保留罚秒）"
   );
+
+  console.log("临时重号：改号瞬间即清除原编号罚秒，即使另一行仍占用该编号");
+  // 当前名次状态（fixtureB）：102 有 1 趟 20 秒，101/103 零次；
+  // 已保存罚秒：101→3。再给 102 保存 7 秒、103 保存 9 秒（103 此行始终不改）。
+  savePenalty(102, "7", "压线");
+  savePenalty(103, "9", "迟到");
+  assert(slotHtml().includes(rowHtml(102, 1, 20, 7, 27, "第 1 名")), "前置：102 罚秒 7 已生效");
+  // 三行互异时按当前编号各取一次稳定引用；之后出现重号也不会找错行。
+  const dup102 = rowOfRunner("102");
+  const dup101 = rowOfRunner("101");
+  const setRunnerAndFire = (row, v) => {
+    row.querySelector(".runner-number").value = v;
+    fire(runnerRows, "input");
+  };
+  // 步骤 1：把 101 行改成 102（临时重号，输入非法）。改行离开的原编号是 101，
+  // 故只清 101；原 102 行（罚秒的归属行）尚未改号，其 7 秒在本步仍保留。
+  setRunnerAndFire(dup101, "102");
+  assert(!globalThis.__penaltiesForTest.has(101), "临时重号瞬间：改行的原编号 101 的 3 秒立即清除");
+  assert(globalThis.__penaltiesForTest.get(102).seconds === 7,
+    "原 102 行尚未改号：102 的 7 秒仍归属该行，本步保留");
+  assert(globalThis.__penaltiesForTest.get(103).seconds === 9, "同一事件中未改号的 103 不受影响");
+  await adjudicate(); // 桩服务器不校验重号仍返回结果
+  assert(slotHtml().includes(rowHtml(102, 1, 20, 7, 27, "第 1 名")), "归属行未改号前，名次仍按 102 的 7 秒展示");
+  // 步骤 2：把原 102 行改为 104——此刻另一行仍占用 102，但该行离开了原编号 102，
+  // 102 的 7 秒与原因必须在输入事件当下立即清除（不等待重算、不因重号而残留）。
+  setRunnerAndFire(dup102, "104");
+  assert(!globalThis.__penaltiesForTest.has(102),
+    "原 102 行改号瞬间：另一行仍占用 102，其 7 秒与原因仍被立即清除");
+  await adjudicate();
+  assert(slotHtml().includes(rowHtml(102, 1, 20, 0, 20, "第 1 名")), "原 102 的 7 秒未留存：102 现为默认 0 秒");
+  let ed102 = editorOf(102);
+  assert(ed102.querySelector(".penalty-seconds").value === "0", "占用 102 编号的行只显示默认 0 秒");
+  assert(ed102.querySelector(".penalty-reason").value === "", "占用 102 编号的行原因已清空");
+  assert(slotHtml().includes(rowHtml(103, 0, 0, 9, 9, "—")), "未改号的 103 罚秒 9 不受影响");
+  // 步骤 3：把 104 行改回 102（再次临时重号），罚秒同样不得恢复。
+  setRunnerAndFire(dup102, "102");
+  assert(!globalThis.__penaltiesForTest.has(102), "再次临时重号瞬间：102 罚秒仍为空，不恢复");
+  // 步骤 4：把第一行改回 101，重号全部解除。
+  setRunnerAndFire(dup101, "101");
+  await adjudicate();
+  assert(slotHtml().includes(rowHtml(102, 1, 20, 0, 20, "第 1 名")), "改回 102 后仍是默认 0 秒，旧 7 秒不恢复");
+  assert(slotHtml().includes(rowHtml(101, 0, 0, 0, 0, "—")), "改回 101 后仍是默认 0 秒，旧 3 秒不恢复");
+  ed102 = editorOf(102);
+  assert(ed102.querySelector(".penalty-seconds").value === "0", "改回后编辑器回显 0 秒");
+  assert(ed102.querySelector(".penalty-reason").value === "", "改回后原因仍为空");
+  const ed101 = editorOf(101);
+  assert(ed101.querySelector(".penalty-seconds").value === "0", "101 编辑器回显 0 秒");
+  assert(ed101.querySelector(".penalty-reason").value === "", "101 原因仍为空");
+  assert(slotHtml().includes(rowHtml(103, 0, 0, 9, 9, "—")), "全程未改号的 103 罚秒始终保留");
+  // 后续区间编辑与重算也不得恢复已释放的罚秒。
+  setVal("smMin", "8"); fire($("smMin"), "input");
+  setVal("smMin", "10"); fire($("smMin"), "input");
+  await adjudicate();
+  assert(slotHtml().includes(rowHtml(102, 1, 20, 0, 20, "第 1 名")), "区间编辑重算后 102 仍为 0 秒");
+  assert(slotHtml().includes(rowHtml(101, 0, 0, 0, 0, "—")), "区间编辑重算后 101 仍为 0 秒");
+  assert(slotHtml().includes(rowHtml(103, 0, 0, 9, 9, "—")), "区间编辑重算后 103 的 9 秒保留");
+
+  console.log("删除选手行时即使另一行仍占用同编号也立即清除该编号罚秒");
+  // 三行：101 / 102 / 103。给 103 保存罚秒后，把 101 行改成 103（临时重号），
+  // 再删除原 103 行：删除瞬间 103 的罚秒必须清掉，尽管改成 103 的另一行仍占用该编号。
+  savePenalty(103, "6", "阻挡");
+  assert(globalThis.__penaltiesForTest.get(103).seconds === 6, "前置：103 罚秒 6 已生效");
+  const rowDel101 = dup101; // 上一场景结束时该行正是 101
+  setRunnerAndFire(rowDel101, "103"); // 101→103，103 原行还在：改号释放的是 101（无罚秒）
+  assert(globalThis.__penaltiesForTest.get(103).seconds === 6, "改号行只是占用 103：原 103 的 6 秒在原行删除前仍在");
+  // 出现两个 103 行：删除的是“原本就是 103”的那一行，不是刚改过来的行。
+  const rowOrig103 = [...runnerRows.querySelectorAll(".runner-row")]
+    .find((x) => x !== rowDel101 && x.querySelector(".runner-number").value === "103");
+  fire(rowOrig103.querySelector(".remove-runner"), "click"); // 删除原 103 行
+  assert(!globalThis.__penaltiesForTest.has(103), "删除瞬间：另一行仍占用 103，其 6 秒与原因仍被立即清除");
+
+  // 补一名 101 选手，恢复三行状态进入后续场景。
+  fire(addRunner, "click");
+  numInputs().find((e) => e.value === "").value = "101";
+  fire(runnerRows, "input");
+  await adjudicate();
 
   console.log("填入示例与清空清除全部罚秒");
   savePenalty(102, "7", "绕行");
